@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"time"
 
@@ -19,7 +21,14 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+var apiKey = "poc"
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("API-KEY") != apiKey {
+		w.WriteHeader(http.StatusUnauthorized) // 401
+		return
+	}
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -58,13 +67,26 @@ func broadcastMessage(message string) {
 	broadcast <- message
 }
 
-func startServer() {
-	http.HandleFunc("/ws", handleConnections)
+func startServer(port ...int) (int, error) {
+	var listener net.Listener
+	var err error
+
+	if len(port) > 0 {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port[0]))
+	} else {
+		listener, err = net.Listen("tcp", ":0") // let system choose random port
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", handleConnections)
 
 	go handleMessages()
 
-	ticker := time.NewTicker(time.Second * 2)
-	defer ticker.Stop()
+	ticker := time.NewTicker(time.Second * 1)
 
 	go func() {
 		for {
@@ -75,22 +97,36 @@ func startServer() {
 		}
 	}()
 
-	log.Println("http server started on :8000")
-	err := http.ListenAndServe(":8000", nil)
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
-	}
+	log.Println("http server started on", listener.Addr().(*net.TCPAddr).Port)
+
+	go func() {
+		err := http.Serve(listener, mux)
+		if err != nil {
+			log.Fatal("ListenAndServe: ", err)
+		}
+		listener.Close()
+	}()
+
+	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-// Write a startClient function that connects to the server and sends a message "Hello world" to the server periodically
-func startClient() {
-	c, _, err := websocket.DefaultDialer.Dial("ws://localhost:8000/ws", nil)
+func startClient(port int) {
+	dialer := websocket.DefaultDialer
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("ws://localhost:%d/ws", port), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Set("API-KEY", apiKey)
+
+	c, _, err := dialer.DialContext(context.Background(), req.URL.String(), req.Header)
 	if err != nil {
 		log.Fatal("dial:", err)
 	}
 	defer c.Close()
 
-	ticker := time.NewTicker(time.Second * 2)
+	ticker := time.NewTicker(time.Second * 1)
 	defer ticker.Stop()
 
 	go func() {
@@ -117,10 +153,13 @@ func startClient() {
 }
 
 func main() {
-	go startServer()
+	port, err := startServer()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	for i := 0; i < 5; i++ {
-		go startClient()
+		go startClient(port)
 	}
 
 	select {}
